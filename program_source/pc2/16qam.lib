@@ -1,0 +1,303 @@
+import("stdfaust.lib");
+
+
+global =environment {
+
+  // delaytime in ms
+  vel_c = 340.;
+  bauds_per_band =8;
+  num_band = 3;
+  baudrate = hslider("baudrate",296,1,10000,0.1);
+
+  clock_duty = hslider("duty",0.5,0,1,0.01);
+  //　一本のジェネレーターからキャリアを生成する場合、base_carrierの整数倍になる
+  base_carrier = 3100;
+  freq_list = par(i,num_band,(i+1)*base_carrier);
+  frequency(index) = ba.take(index+1,freq_list);
+  bitwrite = checkbox("bitwrite");
+  pilot_thresh = hslider("pilot_thresh",0.7,0,1,0.01);
+  ispilot = checkbox("ispilot");
+  dem_rolloff_order = 3;
+  dem_rolloff_rate = hslider("dem_rolloffrate",296,100,10000,0.1);
+  mod_rolloff_order = 3;
+  mod_rolloff_rate = hslider("mod_rolloffrate",296,100,10000,0.1);
+  switchtraining = checkbox("Training");
+  PLLrate = hslider("PLLrate",1,0.01,15,0.01);
+  PLLrate_training = hslider("PLLrate_training",1,0.01,15,0.01);
+  PLL_rate = select2(switchtraining,PLLrate,PLLrate_training);
+  debug_num = hslider("debugBand",1,0,num_band-1,1);
+  prefilter_order = 3;
+  ff_taps = 0;
+  delay_time = int(((bauds_per_band+ff_taps)/baudrate)*ma.SR);
+  dfe_taps = 2;
+  ffsize = hslider("stepsize",0.0005,0,1,0.0001);
+  dfesize = hslider("dfe_step",0.0,0.,2.,0.0001);
+  pilot_length = hslider("pilotlength",17,0,20,1);
+};
+
+
+// ---------------demodulation section
+
+
+
+// demodulator(carrier,phaseerror,input) = (input,((carrier+deltaphase):carrierphasor) )<:(cosmod,sinmod)
+// with {
+//   deltaphase = phaseerror:fi.lowpass(1,global.PLL_rate);
+//   // tablesize = 1<<16;
+//   carrierphasor = os.lf_sawpos;
+//   sinwave = *(ma.PI*2):sin;
+//   coswave = *(ma.PI*2):cos;
+//   sinmod(input,carrierphase) = (carrierphase:sinwave:*(input)):*(2):fi.lowpass(global.dem_rolloff_order,global.dem_rolloff_rate);
+//   cosmod(input,carrierphase) = (carrierphase:coswave:*(input)):*(2):fi.lowpass(global.dem_rolloff_order,global.dem_rolloff_rate);
+// };
+demodulator(phase,input) = (input,phase)<:(cosmod,sinmod)
+with {
+  sinwave = *(ma.PI*2):sin;
+  coswave = *(ma.PI*2):cos;
+  sinmod(input,carrierphase) = (carrierphase:sinwave:*(input)):*(2):fi.lowpass(global.dem_rolloff_order,global.dem_rolloff_rate);
+  cosmod(input,carrierphase) = (carrierphase:coswave:*(input)):*(2):fi.lowpass(global.dem_rolloff_order,global.dem_rolloff_rate);
+};
+
+demodulator_mobile(phase,input) = demodulator(phase,input);
+// ----------------sampling section
+clockdatarecovery(rate) = fi.highpass(1,rate*0.8):abs:fi.resonbp(rate,1000,1):(>(0));
+sample_clock(rate) = os.lf_sawpos(rate);
+
+sampler(clock,in1,in2) =c<:(_,in1,_,in2):(ba.latch,ba.latch)
+with {
+    c = clock:(>(global.clock_duty)):-(0.5);
+};
+sampler_self(rate,in1,in2) = (in1,in2):sampler(clock_self)
+with{
+  loc_osc = os.lf_sawpos(rate);
+  clock_self = (in1,in2):(clockdatarecovery(rate),clockdatarecovery(rate)):>_;
+};
+// feedforward and decision feedback filter
+
+
+complex_rot(rot,i,q) = i3,q3
+with{
+  amp = (i*i+q*q)+0.0001;
+  loc_osc = os.lf_sawpos(rot):*(0);
+  i2 = cos(loc_osc*ma.PI*2);
+  q2 = sin(loc_osc*ma.PI*2);
+  i3 = (i2*i+q2*q);
+  q3 = (i2*q-i*q2);
+};
+lms_stereo(clock,rot,error1,error2,deci1,deci2,in1,in2) = (((((in1,error1):ff),((in2,error2):ff)):complex_rot(rot)),( ((deci1,error1):fb),((deci2,error2):fb) )):ro.cross2:(-,-)
+with{
+
+  ff = (_,_,clock):library("lms_filter.dsp").lms_ff(global.ff_taps,2,global.ffsize);
+  fb = (_,_,clock):library("lms_filter.dsp").lms_fb(global.dfe_taps,1,global.dfesize);
+};
+//
+// ---------------decide section
+
+decider = decide_mono,decide_mono
+with {
+decide_mono = _<:(abs,_):(>(2/3),>(0));
+};
+
+qpsk_decide = (1,(>(0)),1,(>(0)));
+bpsk_decide = (_,_):(atan2):(-(ma.PI/4)):(cos):(>(0))<:(1,_,1,_);
+
+decide_q_b = (_,_)<:(qpsk_decide,bpsk_decide):ro.interleave(4,2):(par(i,4,select2(global.switchtraining)));
+//
+// pilot_table1 = waveform{1,1,0},_:rdtable;
+// pilot_table2 = waveform{1,0,0},_:rdtable;
+//
+// pilot_decider = (pilot_mono,pilot_mono)<:(&,(|:bitinv:*(2)),(xor:*(3))):>-(1):int<:(pilot_table1,1,pilot_table2,1)
+// with{
+//   bitinv(x) = 1- x;
+//   pilot_mono= _:abs:(>(2/3));
+// };
+// // -------pilot tone section
+//
+// pilot_tone(bauds_per_band,clock) = clock:pilot_reader<:(pilot_table1,1,pilot_table2,1)
+// with{
+//   // count_negedge(length,clock) = (clock-(clock:mem)):(<(0)):((+:fmod(length))~(_));
+//   count_threshold(length,threshold,clock) = ((>=(clock,threshold)),(<(clock',threshold))):(&):((+:modulo(length))~(_));
+//   modulo(len) = /(len):ma.decimal:*(len):int;
+//   pilot_reader = count_threshold(bauds_per_band,0.5)<:((modulo(2):+(1)),(>(0))):*:int;
+// };
+
+pilot_ask_base(clock,num_baud,reset) = (1*c):(+~(repeat)):(<(num_baud/2))
+with{
+  c = clock:(>(0.5))<:(_,mem):(>);
+  // writeのポジティブエッジをクロックを同期、ポジティブ時間はクロックよりは長い前提で。。。
+  r = (reset*c)<:(_,mem):(>):(+~(*(reset))):(==(1));
+  repeat = _<:((<(num_baud)),_):*:*(1-r);
+};
+
+pilot_ask(carrier_f,clock,num_baud,reset) = pilot_ask_base(clock,num_baud,reset):rolloff_mono:*(2):*(os.osccos(carrier_f)):*(global.ispilot);
+
+pilot_dem(carrier_f) = _:prefilter(carrier_f,global.baudrate)<:(*):fi.lowpass(global.dem_rolloff_order,global.dem_rolloff_rate):autogain:(>(global.pilot_thresh));
+
+// ---------training section
+training_sequence(clock) = clock<:par(i,4,count_offset(size,size*i):bitnoisetable)
+with {
+  size = 1<<16 ;
+  bitnoisetable(input) = rdtable(size*4,no.noise,int(input)):(>(0));
+  // count_posedge(clock,length) = (clock-(clock:mem)):(>(0)):(+~_):(fmod(length));
+  modulo(len) = /(len):ma.decimal:*(len):int;
+  count_threshold(length,threshold,clock) = ((>=(clock,threshold)),(<(clock',threshold))):(&):((+:modulo(length))~(_));
+  count_offset(length,offset,clock) = (clock:count_threshold(length,0.5))+offset;
+};
+
+qpsk_training(clock) = clock<:(1,(count_offset(size,0):bitnoisetable),1,(count_offset(size,size):bitnoisetable))
+with {
+  size = 1<<16 ;
+  bitnoisetable(input) = rdtable(size*4,no.noise,int(input)):(>(0));
+  // count_posedge(clock,length) = (clock-(clock:mem)):(>(0)):(+~_):(fmod(length));
+  modulo(len) = /(len):ma.decimal:*(len):int;
+  count_threshold(length,threshold,clock) = ((>=(clock,threshold)),(<(clock',threshold))):(&):((+:modulo(length))~(_));
+  count_offset(length,offset,clock) = (clock:count_threshold(length,0.5))+offset;
+};
+
+bpsk_training(clock) = clock<:(1,(count_offset(size,0):bitnoisetable),1,(count_offset(size,0):bitnoisetable))
+with {
+  size = 1<<16 ;
+  bitnoisetable(input) = rdtable(size*4,no.noise,int(input)):(>(0));
+  // count_posedge(clock,length) = (clock-(clock:mem)):(>(0)):(+~_):(fmod(length));
+  modulo(len) = /(len):ma.decimal:*(len):int;
+  count_threshold(length,threshold,clock) = ((>=(clock,threshold)),(<(clock',threshold))):(&):((+:modulo(length))~(_));
+  count_offset(length,offset,clock) = (clock:count_threshold(length,0.5))+offset;
+};
+
+simple_training(clock) = (1,1,1,1);
+
+
+bitinterrupt_qpsk(clock,start) = (_,_,_,_),((data1,data2):ro.interleave(2,16):(multiplexeight,multiplexeight):(1,_,1,_)):(ro.interleave(4,2):par(i,4,select2(keep)))
+with{
+  data1 = hslider("datatowrite1",0,0,65535,1)<:par(i,16,encodebit(i));
+  data2 = hslider("datatowrite2",0,0,65535,1)<:par(i,16,encodebit(i));
+  encodebit(i) = _:(/(2^i)):floor:%(2);
+
+  startedge = start<:(_,mem):(>);
+
+  countclock = clock:(>(0.5))<:(_,mem):(>):(+~(*(1-startedge)))<:((<=(16)),_):*;
+
+  keep = countclock:(>(0));
+
+  multiplexeight = si.bus(16):par(i,16,*(==(i+1,countclock))):>_;
+
+};
+
+
+switchbits(bit1,bit2,bit3,bit4,tbit1,tbit2,tbit3,tbit4) = (sbit1,sbit2,sbit3,sbit4)
+with{
+  selbit(bit,tbit) = select2(global.switchtraining,bit,tbit);
+  sbit1=selbit(bit1,tbit1);
+  sbit2=selbit(bit2,tbit2);
+  sbit3=selbit(bit3,tbit3);
+  sbit4=selbit(bit4,tbit4);
+};
+
+// ----------------remapper section
+
+remapper(bit1,bit2,bit3,bit4) = remapper_mono(bit1,bit2),remapper_mono(bit3,bit4)
+with {
+  bitscale(bmin,bmax) = *(bmax-bmin)+bmin;
+  remapper_mono(b1,b2) =(b1:bitscale(1/3,1) ) * ( b2:bitscale(-1,1) );
+};
+
+bpsk_remap(bit1,bit2,bit3,bit4)= remapper_mono(bit1,bit2),0
+with{
+  bitscale(bmin,bmax) = *(bmax-bmin)+bmin;
+  remapper_mono(b1,b2) =(b1:bitscale(1/3,1) ) * ( b2:bitscale(-1,1) );
+};
+
+//  ---------------rolloff baseband signal
+rolloff_mono = fi.lowpass(global.mod_rolloff_order,global.mod_rolloff_rate);
+rolloff = rolloff_mono,rolloff_mono;
+
+
+//  ---------------modulator
+multiphasor(base_freq,band_num) = base_freq:os.lf_sawpos<:par(i,band_num,(*(i+1):ma.decimal));
+multiphasor_pll(base_freq,band_num,phaseerror) = (base_freq+deltaphase):os.lf_sawpos<:par(i,band_num,(*(i+1):ma.decimal))
+with{
+  deltaphase = phaseerror:fi.lowpass(1,global.PLL_rate);
+};
+
+modulator(phase,in1,in2) = phase<:(coswave,sinwave):(*(in1),*(in2)):+
+with {
+  // modcarrierphasor = os.lf_sawpos(carrier);
+  // tablesize = 1<<16;
+  sinwave = *(ma.PI*2):sin;
+  coswave = *(ma.PI*2):cos;
+};
+
+
+//  ---------------caluculate phaseerror section
+// average(n) = (si.bus(n):>_):/(n);
+
+
+compute_phaseerror(cos1,sin1,cos2,sin2)=atan2(cos1,sin1)-atan2(cos2:trainingdelay,sin2:trainingdelay)
+with {
+  trainingdelay = @((global.delay_time)*global.switchtraining);
+};
+
+// automatic gain controllable
+autogain(input) = input/(gain_ratio+0.001)
+  with {
+    correct = hslider("gain",0.707,0,1,0.01);
+    inv_min(minus) = (minus,_):-;
+    estimate_gain=(_<:(*)):sqrt:fi.lowpass(1,hslider("agc_rate",5,0.1,100,0.01));
+    gain_ratio = ((input:estimate_gain)/(correct+0.00001));
+    switchgain(c,x) = (c*x):(+~(*(1-c)));
+  };
+
+//-----------prefilter
+prefilter(carrier,baudrate) = fi.lowpass(global.prefilter_order,carrier+baudrate):fi.highpass(global.prefilter_order,carrier-baudrate);
+
+//---------------------------------release section
+qam_pilot(carrier,baudrate,dem_phase,mod_phase,input,clock) = ( ((dem_phase,(input:prefilter(carrier,baudrate):autogain)):demodulator ),(clock:pilot_tone(global.bauds_per_band):remapper:rolloff<:si.bus(4))):(compute_phaseerror,((mod_phase,_,_):modulator));
+
+qam_single(carrier,baudrate,dem_phase,mod_phase,input,clock) = (dem_phase,(input:prefilter(carrier,baudrate):autogain)):demodulator:((_,_,clock):sampler:decider:remapper:rolloff:(mod_phase,_,_):modulator);
+
+qam = case{
+
+  (0,carrier,baudrate,dem_phase,mod_phase,input,clock) => qam_pilot(carrier,baudrate,dem_phase,mod_phase,input,clock);
+
+  (index,carrier,baudrate,dem_phase,mod_phase,input,clock)=> qam_single(carrier,baudrate,dem_phase,mod_phase,input,clock);
+};
+
+qam_multi(base_freq,num_band,baudrate,phase_error,input) = ((phase_error:multiphasor_pll(base_freq,num_band)),multiphasor(base_freq,num_band),(input<:si.bus(num_band)),(sample_clock(baudrate)<:si.bus(num_band)) )<:ro.interleave(num_band,4):par(i,num_band,(qam(i,global.frequency(i),global.baudrate))):(_,(si.bus(num_band):>_));
+
+//--------------------debug section
+
+debug_bus(this_band_num,debug_num) = par(i,6,*(isSelected(this_band_num,debug_num)))
+with {
+  isSelected(x,y) = (x,y):==;
+};
+
+qam_pilot_debug(index,carrier,baudrate,dem_phase,mod_phase,input,clock) = ((dem_phase,(input:prefilter(carrier,baudrate):autogain)):demodulator)<:(si.bus(2),(clock:pilot_tone(global.bauds_per_band):remapper<:si.bus(4)),si.bus(2)):(si.bus(2),(rolloff<:si.bus(6)),si.bus(4)):(compute_phaseerror,((mod_phase,_,_):modulator),debug_bus(index,global.debug_num));
+
+
+qam_single_debug(index,carrier,baudrate,dem_phase,mod_phase,input,clock) = ((dem_phase,(input:prefilter(carrier,baudrate))):demodulator:(autogain,autogain))<:((filtering),si.bus(2)) :(_,((rolloff)<:si.bus(4)),si.bus(4)):(_,((mod_phase,_,_):modulator),debug_bus(index,global.debug_num))
+with{
+  traindel = @(global.delay_time*2*global.switchtraining),@(global.delay_time*2*global.switchtraining);
+  filtering(in1,in2) =  ((((si.bus(5),((in1,in2):sampler(clock))):lms_stereo(clock))<:((traindel:decide_remap),_,_) )~(fi.lowpass(1,global.PLL_rate),_,_,_,_)):(_,!,!,_,_,_,_);
+
+  phasediff(cos1,sin1,cos2,sin2)=atan2(cos2,sin2)-atan2(cos1,sin1);
+  diff(cos1,sin1,cos2,sin2) = (cos2-cos1),(sin2-sin1);
+  decide_remap(y1,y2) = (y1,y2):(decide_q_b,(clock:qpsk_training)):switchbits:bitinterrupt_qpsk(clock,global.bitwrite):remapper<:(phasediff(y1,y2),diff(y1,y2),_,_);
+};
+
+qam_debug = case{
+
+  (0,carrier,baudrate,dem_phase,mod_phase,input,clock) => qam_pilot_debug(0,carrier,baudrate,dem_phase,mod_phase,input,clock);
+
+  (index,carrier,baudrate,dem_phase,mod_phase,input,clock)=> qam_single_debug(index,carrier,baudrate,dem_phase,mod_phase,input,clock);
+};
+
+qam_multi_debug(base_freq,num_band,baudrate,clock,phase_error,input) = ((phase_error:multiphasor_pll(base_freq,num_band)),multiphasor(base_freq,num_band),(input<:si.bus(num_band)),(clock<:si.bus(num_band)))<:ro.interleave(num_band,4):par(i,num_band,(qam_debug(i,global.frequency(i),global.baudrate))):(_,(si.bus(7*num_band):>si.bus(7)),clock);
+
+// ---------select by isDebug(0:release,1:Debug)
+// process_pre =
+// case{
+//   (0) => qam_multi;
+//   (1) => (_,sample_clock(global.baudrate)):qam_multi_debug;
+// };
+//
+// process =process_pre(global.isDebug);

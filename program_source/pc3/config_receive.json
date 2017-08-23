@@ -1,0 +1,31 @@
+{
+	"input-channel" : 3,
+	"output-channel" : 1,
+	"inputlevel" : 12.0,
+	"audiosetting" : 	{
+		"inputDevice" : "Built-in Microphone",
+		"outputDevice" : "Built-in Output",
+		"samplingRate" : "48000",
+		"signalVectorSize" : "128",
+		"i/oVectorSize" : "128",
+		"overdriveMode" : "Off",
+		"audioInterruptMode" : "Off",
+		"dspStatus" : "On"
+	}
+,
+	"admsetting" : 	{
+		"baudrate" : 267.335,
+		"dem_rolloffrate" : 267.335,
+		"mod_rolloffrate" : 267.335,
+		"dem_carrier_freq" : 4000.0,
+		"PLLrate" : 1.0,
+		"PLLrate_training" : 1.0,
+		"pilot_freq" : 15000.0,
+		"pilot_pllgain" : 0.01,
+		"pilot_pllrate" : 0.01,
+		"pilot_thresh" : 0.75,
+		"agc_rate" : 1.0,
+		"gain" : 0.77
+	}
+
+}

@@ -1,0 +1,32 @@
+{
+	"input-channel" : 3,
+	"output-channel" : 1,
+	"masterlevel" : -12.0,
+	"audiosetting" : 	{
+		"inputDevice" : "Yamaha Steinberg FW",
+		"outputDevice" : "Yamaha Steinberg FW",
+		"samplingRate" : "48000",
+		"signalVectorSize" : "128",
+		"i/oVectorSize" : "128",
+		"overdriveMode" : "Off",
+		"audioInterruptMode" : "Off",
+		"dspStatus" : "On"
+	}
+,
+	"admsetting" : 	{
+		"baudrate" : 266.335,
+		"dem_rolloffrate" : 266.335,
+		"mod_rolloffrate" : 393.1,
+		"dem_carrier_freq" : 4000.0,
+		"mod_carrier_freq" : 1000.0,
+		"PLLrate" : 1.0,
+		"PLLrate_training" : 1.0,
+		"agc_rate" : 1.0,
+		"gain" : 0.77,
+		"debugBand" : 2.0,
+		"forcerotate" : 0.0,
+		"ispilot" : 1,
+		"pilot_freq" : 15000
+	}
+
+}
